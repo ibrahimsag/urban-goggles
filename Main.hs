@@ -56,9 +56,17 @@ data Expr
   = Float Double
   | Var String
   | Call Name [Expr]
-  | Function Name [Name] Expr
-  | Extern Name [Name]
   | BinaryOp Name Expr Expr
+  deriving (Eq, Ord, Show)
+
+data Defn
+  = Function Name [Name] Expr
+  | Extern Name [Name]
+  deriving (Eq, Ord, Show)
+
+data Phrase
+  = DefnPhrase Defn
+  | ExprPhrase Expr
   deriving (Eq, Ord, Show)
 
 -- # Parser
