@@ -104,21 +104,6 @@ variable = do
   var <- identifier
   return (Var var)
 
-function :: Parser Expr
-function = do
-  reserved "def"
-  name <- identifier
-  args <- parens (many identifier)
-  body <- expr
-  return (Function name args body)
-
-extern :: Parser Expr
-extern = do
-  reserved "extern"
-  name <- identifier
-  args <- parens (many identifier)
-  return (Extern name args)
-
 call :: Parser Expr
 call = do
   name <- identifier
@@ -128,16 +113,31 @@ call = do
 factor :: Parser Expr
 factor = try floating
       <|> try int
-      <|> try extern
-      <|> try function
       <|> try call
       <|> variable
       <|> parens expr
 
-defn :: Parser Expr
+function :: Parser Defn
+function = do
+  reserved "def"
+  name <- identifier
+  args <- parens (many identifier)
+  body <- expr
+  return (Function name args body)
+
+extern :: Parser Defn
+extern = do
+  reserved "extern"
+  name <- identifier
+  args <- parens (many identifier)
+  return (Extern name args)
+
+defn :: Parser Defn
 defn = try extern
    <|> try function
-   <|> expr
+
+phrase :: Parser Phrase
+phrase = (DefnPhrase <$> try defn) <|> (ExprPhrase <$> try expr)
 
 contents :: Parser a -> Parser a
 contents p = do
@@ -146,16 +146,16 @@ contents p = do
   eof
   return r
 
-toplevel :: Parser [Expr]
+toplevel :: Parser [Phrase]
 toplevel = many $ do
-  def <- defn
+  def <- phrase
   reservedOp ";"
   return def
 
 parseExpr :: String -> Either ParseError Expr
 parseExpr s = parse (contents expr) "<stdin>" s
 
-parseToplevel :: String -> Either ParseError [Expr]
+parseToplevel :: String -> Either ParseError [Phrase]
 parseToplevel s = parse (contents toplevel) "<stdin>" s
 
 -- # RPPL
