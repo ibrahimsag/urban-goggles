@@ -160,7 +160,7 @@ parseToplevel s = parse (contents toplevel) "<stdin>" s
 
 -- # RPPL
 
-process :: [Expr] -> IO ()
+process :: [Phrase] -> IO ()
 process expr = mapM_ print expr
 
 main :: IO ()
