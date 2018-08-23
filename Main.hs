@@ -5,6 +5,8 @@ import Text.Parsec.Language (emptyDef)
 
 import qualified Text.Parsec.Token as Tok
 
+-- # Lexer
+
 lexer :: Tok.TokenParser ()
 lexer = Tok.makeTokenParser style
   where
@@ -37,6 +39,20 @@ reserved = Tok.reserved lexer
 
 reservedOp :: String -> Parser ()
 reservedOp = Tok.reservedOp lexer
+
+-- # AST
+
+type Name = String
+
+data Expr
+  = Float Double
+  | Var String
+  | Call Name [Expr]
+  | Function Name [Name] Expr
+  | Extern Name [Name]
+  | BinaryOp Name Expr Expr
+  deriving (Eq, Ord, Show)
+
 
 main :: IO ()
 main = putStrLn "Hello, Haskell!"
