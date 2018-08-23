@@ -1,6 +1,10 @@
 module Main where
 
+import System.Console.Haskeline
+
 import Data.Functor.Identity(Identity)
+
+import Control.Monad.Trans
 
 import Text.Parsec
 import Text.Parsec.String (Parser)
@@ -146,6 +150,15 @@ parseExpr s = parse (contents expr) "<stdin>" s
 parseToplevel :: String -> Either ParseError [Expr]
 parseToplevel s = parse (contents toplevel) "<stdin>" s
 
+-- # RPPL
+
+process :: [Expr] -> IO ()
+process expr = mapM_ print expr
 
 main :: IO ()
-main = putStrLn "Hello, Haskell!"
+main = runInputT defaultSettings loop
+  where
+    loop :: InputT IO ()
+    loop = getInputLine "ready> " >>= \case
+      Nothing -> outputStrLn "Goodbye."
+      Just input -> (liftIO $ (either print process . parseToplevel) input) >> loop
