@@ -23,7 +23,12 @@ executable llh
                      , parsec
                      , haskeline
                      , mtl
+                     , llvm-hs-pure
+                     , containers
+                     , bytestring
+                     , llvm-hs
   -- hs-source-dirs:
   default-language:    Haskell2010
   extra-libraries:     iconv
-  default-extensions:  OverloadedStrings, LambdaCase
+  default-extensions:  OverloadedStrings, LambdaCase, DeriveFunctor, GeneralizedNewtypeDeriving,
+                       TupleSections, DeriveAnyClass
