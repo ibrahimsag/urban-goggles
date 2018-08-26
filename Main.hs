@@ -23,6 +23,8 @@ import Text.Parsec.Language (emptyDef)
 import qualified Text.Parsec.Token as Tok
 import qualified Text.Parsec.Expr as Ex
 
+import qualified LLVM.Analysis as LLysis
+import qualified LLVM.PassManager as LLPM
 import qualified LLVM.Context as LLContext
 import qualified LLVM.Module as LLModule
 import qualified LLVM.AST as LLAST
@@ -232,11 +234,17 @@ codegenDefn = \case
 
 packShort = BSS.toShort . BS.pack
 
+passes :: LLPM.PassSetSpec
+passes = LLPM.defaultCuratedPassSetSpec { LLPM.optLevel = Just 3 }
 
 printModulIR :: LLAST.Module -> IO ()
 printModulIR modul = LLContext.withContext $ \ctx -> do
-    llir <- LLModule.withModuleFromAST ctx modul LLModule.moduleLLVMAssembly
-    BS.putStrLn llir
+    LLModule.withModuleFromAST ctx modul $ \m -> do
+      LLPM.withPassManager passes $ \pm -> do
+        LLysis.verify m
+        LLPM.runPassManager pm m
+        llir <- LLModule.moduleLLVMAssembly m
+        BS.putStrLn llir
 
 buildLLModule :: [Phrase] -> Codegen LLAST.Module
 buildLLModule phrases = do
