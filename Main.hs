@@ -2,6 +2,7 @@ module Main where
 
 import System.Console.Haskeline
 import System.Environment
+import Foreign.Ptr (FunPtr, castFunPtr)
 
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.ByteString.Short as BSS
@@ -23,6 +24,7 @@ import Text.Parsec.Language (emptyDef)
 import qualified Text.Parsec.Token as Tok
 import qualified Text.Parsec.Expr as Ex
 
+import qualified LLVM.ExecutionEngine as LLEE
 import qualified LLVM.Analysis as LLysis
 import qualified LLVM.PassManager as LLPM
 import qualified LLVM.Context as LLContext
@@ -185,10 +187,16 @@ data CodegenState = CodegenState {
     symbolTable :: Map Name LLAST.Operand
   , functionTable :: Map Name LLAST.Operand
   , modDefinitions :: [LLAST.Definition]
+  , anonSupply :: Int
   }
 
 emptyCodegen :: CodegenState
-emptyCodegen = CodegenState { symbolTable = Map.empty, functionTable = Map.empty, modDefinitions = []}
+emptyCodegen = CodegenState
+    { symbolTable = Map.empty
+    , functionTable = Map.empty
+    , modDefinitions = []
+    , anonSupply = 0
+    }
 
 type Codegen =  (StateT CodegenState IO)
 
@@ -237,6 +245,28 @@ packShort = BSS.toShort . BS.pack
 passes :: LLPM.PassSetSpec
 passes = LLPM.defaultCuratedPassSetSpec { LLPM.optLevel = Just 3 }
 
+toAnon :: Phrase -> Codegen Defn
+toAnon (DefnPhrase f) = return f
+toAnon (ExprPhrase e) = do
+  lastAnonId <- gets anonSupply
+  let newAnonId = lastAnonId + 1
+  modify (\s -> s { anonSupply = newAnonId })
+  return (Function ("anon" ++ show newAnonId) [] e)
+
+getLastAnon :: Codegen (Maybe String)
+getLastAnon = do
+  lastAnonId <- gets anonSupply
+  return (if lastAnonId == 0 then Nothing else Just ("anon" ++ show lastAnonId))
+
+buildLLModule :: [Phrase] -> Codegen LLAST.Module
+buildLLModule phrases = do
+    modDefs <- gets modDefinitions
+    anonLabeledPhrases <- traverse toAnon phrases
+    defs <- IRB.execModuleBuilderT IRB.emptyModuleBuilder (mapM_ codegenDefn anonLabeledPhrases)
+    let updatedDefs = modDefs ++ defs
+    modify (\s -> s { modDefinitions = updatedDefs } )
+    IRB.buildModuleT (packShort "<stdin>") (traverse IRB.emitDefn updatedDefs)
+
 printModulIR :: LLAST.Module -> IO ()
 printModulIR modul = LLContext.withContext $ \ctx -> do
     LLModule.withModuleFromAST ctx modul $ \m -> do
@@ -246,35 +276,52 @@ printModulIR modul = LLContext.withContext $ \ctx -> do
         llir <- LLModule.moduleLLVMAssembly m
         BS.putStrLn llir
 
-buildLLModule :: [Phrase] -> Codegen LLAST.Module
-buildLLModule phrases = do
-    modDefs <- gets modDefinitions
-    defs <- IRB.execModuleBuilderT IRB.emptyModuleBuilder builder
-    let updatedDefs = modDefs ++ defs
-    modify (\s -> s { modDefinitions = updatedDefs } )
-    IRB.buildModuleT (packShort "<stdin>") (traverse IRB.emitDefn updatedDefs)
-  where
-    builder = mapM_ (codegenDefn . toAnon) phrases
-    toAnon (DefnPhrase f) = f
-    toAnon (ExprPhrase e) = Function "anon" [] e
+-- # JIT
 
--- # RCPL
+runJIT :: (Maybe String, LLAST.Module) -> IO ()
+runJIT (lastAnonName, modul) = do
+  LLContext.withContext $ \ctx -> do
+    jit ctx $ \executionEngine ->
+      LLModule.withModuleFromAST ctx modul $ \m -> do
+        LLPM.withPassManager passes $ \pm -> do
+          LLysis.verify m
+          LLPM.runPassManager pm m
+
+          llir <- LLModule.moduleLLVMAssembly m
+          BS.putStrLn llir
+
+          LLEE.withModuleInEngine executionEngine m $ \ee -> do
+            mainfn <- maybe (return Nothing) (LLEE.getFunction ee . LLAST.mkName) lastAnonName
+            maybe (return ()) (run >=> print . ("Evaluated to: " ++) . show) mainfn
+
+jit :: LLContext.Context -> (LLEE.MCJIT -> IO a) -> IO a
+jit c = LLEE.withMCJIT c optlevel model ptrelim fastins
+  where
+    optlevel = Just 2     -- optimization level
+    model    = Nothing    -- code model (Default)
+    ptrelim  = Nothing    -- frame pointer elimination
+    fastins  = Nothing    -- fast instruction selection
+
+foreign import ccall "dynamic" haskFun :: FunPtr (IO Double) -> (IO Double)
+
+run :: FunPtr a -> IO Double
+run fn = haskFun (castFunPtr fn :: FunPtr (IO Double))
+
+-- # REPL
 
 process :: String -> Codegen ()
-process = either (liftIO . print) (buildLLModule >=> liftIO . printModulIR) . parseToplevel
+process = either (liftIO . print) (buildLLModule >=> (\m -> (, m) <$> getLastAnon) >=> liftIO . runJIT) . parseToplevel
 
 interactive :: Codegen ()
 interactive = runInputT defaultSettings loop
   where
     loop :: InputT Codegen ()
-    loop = getInputLine "ready> " >>= \case
-      Nothing -> outputStrLn "Goodbye."
-      Just input -> (lift $ process input) >> loop
+    loop = getInputLine "ready> " >>= maybe (outputStrLn "Goodbye.") ((>> loop) . lift . process)
 
 evalWithEmptyCodegen :: Codegen () -> IO ()
 evalWithEmptyCodegen = flip evalStateT emptyCodegen
 
 main :: IO ()
 main = getArgs >>= \case
-  [] -> evalWithEmptyCodegen $ interactive
+  [] -> evalWithEmptyCodegen interactive
   filename :_ -> readFile filename >>= evalWithEmptyCodegen . process
