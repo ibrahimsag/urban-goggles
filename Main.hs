@@ -41,7 +41,7 @@ lexer = Tok.makeTokenParser style
     style = emptyDef {
         Tok.commentLine = "#"
       , Tok.reservedOpNames = ["+", "*", "-", "/", ";", ",", "<"]
-      , Tok.reservedNames = ["def", "extern", "if", "then", "else", "in", "for"]
+      , Tok.reservedNames = ["def", "extern", "if", "then", "else", "in", "for", "binary", "unary"]
       }
 
 integer :: Parser Integer
@@ -62,11 +62,20 @@ semiSep = Tok.semiSep lexer
 identifier :: Parser String
 identifier = Tok.identifier lexer
 
+whitespace :: Parser ()
+whitespace = Tok.whiteSpace lexer
+
 reserved :: String -> Parser ()
 reserved = Tok.reserved lexer
 
 reservedOp :: String -> Parser ()
 reservedOp = Tok.reservedOp lexer
+
+operator :: Parser String
+operator = do
+  c <- Tok.opStart emptyDef
+  cs <- many $ Tok.opLetter emptyDef
+  return (c:cs)
 
 -- # AST
 
@@ -77,6 +86,7 @@ data Expr
   | Var String
   | Call Name [Expr]
   | BinaryOp Name Expr Expr
+  | UnaryOp Name Expr
   | If Expr Expr Expr
   | For Name Expr Expr Expr Expr
   deriving (Eq, Ord, Show)
@@ -84,6 +94,8 @@ data Expr
 data Defn
   = Function Name [Name] Expr
   | Extern Name [Name]
+  | BinaryDef Name [Name] Expr
+  | UnaryDef Name Name Expr
   deriving (Eq, Ord, Show)
 
 data Phrase
@@ -120,8 +132,11 @@ floating = do
   n <- float
   return (Float n)
 
+binop = Ex.Infix (BinaryOp <$> op) Ex.AssocLeft
+unop = Ex.Prefix (UnaryOp <$> op)
+
 expr :: Parser Expr
-expr = Ex.buildExpressionParser table factor
+expr = Ex.buildExpressionParser (table ++ [[unop], [binop]]) factor
 
 variable :: Parser Expr
 variable = do
@@ -143,6 +158,13 @@ ifthen = do
   reserved "else"
   fl <- expr
   return (If cond tr fl)
+
+op :: Parser String
+op = do
+  whitespace
+  o <- operator
+  whitespace
+  return o
 
 for :: Parser Expr
 for = do
@@ -167,6 +189,25 @@ factor = try floating
       <|> variable
       <|> parens expr
 
+binarydef :: Parser Defn
+binarydef = do
+  reserved "def"
+  reserved "binary"
+  o <- op
+  prec <- int
+  args <- parens (many identifier)
+  body <- expr
+  return (BinaryDef o args body)
+
+unarydef :: Parser Defn
+unarydef = do
+  reserved "def"
+  reserved "unary"
+  o <- op
+  args <- parens (identifier)
+  body <- expr
+  return (UnaryDef o args body)
+
 function :: Parser Defn
 function = do
   reserved "def"
@@ -185,9 +226,12 @@ extern = do
 defn :: Parser Defn
 defn = try extern
    <|> try function
+   <|> try binarydef
+   <|> try unarydef
 
 phrase :: Parser Phrase
-phrase = (DefnPhrase <$> try defn) <|> (ExprPhrase <$> try expr)
+phrase = (DefnPhrase <$> try defn)
+     <|> (ExprPhrase <$> try expr)
 
 contents :: Parser a -> Parser a
 contents p = do
@@ -234,6 +278,8 @@ codegenIR :: Expr -> IRB.IRBuilderT (IRB.ModuleBuilderT Codegen) LLAST.Operand
 codegenIR = \case
   Float d         -> IRB.double d
   Var name        -> maybe (error ("unknown variable: " ++ name)) id . Map.lookup name <$> gets symbolTable
+  UnaryOp op e -> do
+    codegenIR (Call ("unary" ++ op) [e])
   BinaryOp op l r -> do
     lo <- codegenIR l
     ro <- codegenIR r
@@ -242,7 +288,7 @@ codegenIR = \case
       "-" -> IRB.fsub lo ro
       "*" -> IRB.fmul lo ro
       "<" -> IRB.fcmp LLAST.ULT lo ro >>= (\operand -> IRB.uitofp operand doubleTy)
-      _   -> error ("unknown operator: " ++ op)
+      _   -> codegenIR (Call ("binary" ++ op) [l, r])
   Call name args  ->  do
     calleeOperand <- (maybe (error ("unknown function: " ++ name)) id . Map.lookup name ) <$> gets functionTable
     IRB.call calleeOperand =<< traverse (fmap (,[]) . codegenIR) args
@@ -295,6 +341,11 @@ codegenIR = \case
 
 codegenDefn :: Defn -> (IRB.ModuleBuilderT Codegen) LLAST.Operand
 codegenDefn = \case
+  UnaryDef name args body ->
+    codegenDefn (Function ("unary" ++ name) [args] body)
+
+  BinaryDef name args body ->
+    codegenDefn (Function ("binary" ++ name) args body)
   Function name args body -> do
     funcOperand <- IRB.function
           (LLAST.Name (packShort name))
