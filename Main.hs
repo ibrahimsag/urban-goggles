@@ -20,10 +20,10 @@ import Control.Monad.State.Strict
 import Text.Parsec
 import Text.Parsec.String (Parser)
 import Text.Parsec.Language (emptyDef)
-
 import qualified Text.Parsec.Token as Tok
 import qualified Text.Parsec.Expr as Ex
 
+import qualified LLVM.Exception as LLException
 import qualified LLVM.ExecutionEngine as LLEE
 import qualified LLVM.Analysis as LLysis
 import qualified LLVM.PassManager as LLPM
@@ -247,9 +247,9 @@ codegenIR = \case
     calleeOperand <- (maybe (error ("unknown function: " ++ name)) id . Map.lookup name ) <$> gets functionTable
     IRB.call calleeOperand =<< traverse (fmap (,[]) . codegenIR) args
   If cond tr fl -> do
-    let thenBlock = (LLAST.mkName "ifthen")
-        elseBlock = (LLAST.mkName "ifelse")
-        contBlock = (LLAST.mkName "ifcont")
+    thenBlock <- IRB.freshName "ifthen"
+    elseBlock <- IRB.freshName "ifelse"
+    contBlock <- IRB.freshName "ifcont"
     condOp <- codegenIR cond
     false <- IRB.double 0
     test <- IRB.fcmp LLAST.ONE false condOp
@@ -257,26 +257,29 @@ codegenIR = \case
     
     IRB.emitBlockStart thenBlock
     trval <- codegenIR tr
+    thenBlock <- IRB.currentBlock
     IRB.br contBlock
 
     IRB.emitBlockStart elseBlock
     flval <- codegenIR fl
+    elseBlock <- IRB.currentBlock
     IRB.br contBlock
 
     IRB.emitBlockStart contBlock
     IRB.phi [(trval, thenBlock), (flval, elseBlock)]
   For ivar start cond step body -> mdo
-    let entryBlock = LLAST.mkName "for.entry"
-        loopBlock = LLAST.mkName "for.loop"
-        contBlock = LLAST.mkName "for.cont"
+    entryBlock <- IRB.freshName "for.entry"
+    loopBlock  <- IRB.freshName "for.loop"
+    contBlock  <- IRB.freshName "for.cont"
 
     IRB.emitBlockStart entryBlock
     istart <- codegenIR start  -- Generate loop variable initial value
     stepVal <- codegenIR step  -- Generate loop variable step
+    entryBlock' <- IRB.currentBlock
     IRB.br loopBlock
 
     IRB.emitBlockStart loopBlock
-    i <- IRB.phi [(istart, entryBlock), (iNext, loopBlock)]
+    i <- IRB.phi [(istart, entryBlock'), (iNext, loopBlock')]
     modify (\s -> s { symbolTable = Map.insert ivar i (symbolTable s) })
     codegenIR body
     iNext <- IRB.fadd i stepVal
@@ -284,6 +287,7 @@ codegenIR = \case
     condOp <- codegenIR cond
     falseOp <- IRB.double 0
     test <- IRB.fcmp LLAST.ONE falseOp condOp
+    loopBlock' <- IRB.currentBlock
     IRB.condBr test loopBlock contBlock
 
     IRB.emitBlockStart contBlock
@@ -356,7 +360,7 @@ runJIT (lastAnonName, modul) = do
     jit ctx $ \executionEngine ->
       LLModule.withModuleFromAST ctx modul $ \m -> do
         LLPM.withPassManager passes $ \pm -> do
-          LLysis.verify m
+          LLysis.verify m `catch` (\(LLException.VerifyException e) -> putStrLn e)
           LLPM.runPassManager pm m
 
           llir <- LLModule.moduleLLVMAssembly m
