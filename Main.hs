@@ -41,7 +41,7 @@ lexer = Tok.makeTokenParser style
     style = emptyDef {
         Tok.commentLine = "#"
       , Tok.reservedOpNames = ["+", "*", "-", "/", ";", ",", "<"]
-      , Tok.reservedNames = ["def", "extern", "if", "then", "else"]
+      , Tok.reservedNames = ["def", "extern", "if", "then", "else", "in", "for"]
       }
 
 integer :: Parser Integer
@@ -78,6 +78,7 @@ data Expr
   | Call Name [Expr]
   | BinaryOp Name Expr Expr
   | If Expr Expr Expr
+  | For Name Expr Expr Expr Expr
   deriving (Eq, Ord, Show)
 
 data Defn
@@ -143,11 +144,26 @@ ifthen = do
   fl <- expr
   return (If cond tr fl)
 
+for :: Parser Expr
+for = do
+  reserved "for"
+  var <- identifier
+  reservedOp "="
+  start <- expr
+  reservedOp ","
+  cond <- expr
+  reservedOp ","
+  step <- expr
+  reserved "in"
+  body <- expr
+  return $ For var start cond step body
+
 factor :: Parser Expr
 factor = try floating
       <|> try int
       <|> try call
       <|> try ifthen
+      <|> try for
       <|> variable
       <|> parens expr
 
@@ -238,7 +254,7 @@ codegenIR = \case
     false <- IRB.double 0
     test <- IRB.fcmp LLAST.ONE false condOp
     IRB.condBr test thenBlock elseBlock
-
+    
     IRB.emitBlockStart thenBlock
     trval <- codegenIR tr
     IRB.br contBlock
@@ -249,7 +265,29 @@ codegenIR = \case
 
     IRB.emitBlockStart contBlock
     IRB.phi [(trval, thenBlock), (flval, elseBlock)]
+  For ivar start cond step body -> mdo
+    let entryBlock = LLAST.mkName "for.entry"
+        loopBlock = LLAST.mkName "for.loop"
+        contBlock = LLAST.mkName "for.cont"
 
+    IRB.emitBlockStart entryBlock
+    istart <- codegenIR start  -- Generate loop variable initial value
+    stepVal <- codegenIR step  -- Generate loop variable step
+    IRB.br loopBlock
+
+    IRB.emitBlockStart loopBlock
+    i <- IRB.phi [(istart, entryBlock), (iNext, loopBlock)]
+    modify (\s -> s { symbolTable = Map.insert ivar i (symbolTable s) })
+    codegenIR body
+    iNext <- IRB.fadd i stepVal
+
+    condOp <- codegenIR cond
+    falseOp <- IRB.double 0
+    test <- IRB.fcmp LLAST.ONE falseOp condOp
+    IRB.condBr test loopBlock contBlock
+
+    IRB.emitBlockStart contBlock
+    IRB.double 0
 
 codegenDefn :: Defn -> (IRB.ModuleBuilderT Codegen) LLAST.Operand
 codegenDefn = \case
