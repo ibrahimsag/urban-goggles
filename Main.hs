@@ -41,7 +41,7 @@ lexer = Tok.makeTokenParser style
     style = emptyDef {
         Tok.commentLine = "#"
       , Tok.reservedOpNames = ["+", "*", "-", "/", ";", ",", "<"]
-      , Tok.reservedNames = ["def", "extern"]
+      , Tok.reservedNames = ["def", "extern", "if", "then", "else"]
       }
 
 integer :: Parser Integer
@@ -77,6 +77,7 @@ data Expr
   | Var String
   | Call Name [Expr]
   | BinaryOp Name Expr Expr
+  | If Expr Expr Expr
   deriving (Eq, Ord, Show)
 
 data Defn
@@ -132,10 +133,21 @@ call = do
   args <- parens $ commaSep expr
   return (Call name args)
 
+ifthen :: Parser Expr
+ifthen = do
+  reserved "if"
+  cond <- expr
+  reserved "then"
+  tr <- expr
+  reserved "else"
+  fl <- expr
+  return (If cond tr fl)
+
 factor :: Parser Expr
 factor = try floating
       <|> try int
       <|> try call
+      <|> try ifthen
       <|> variable
       <|> parens expr
 
@@ -218,6 +230,26 @@ codegenIR = \case
   Call name args  ->  do
     calleeOperand <- (maybe (error ("unknown function: " ++ name)) id . Map.lookup name ) <$> gets functionTable
     IRB.call calleeOperand =<< traverse (fmap (,[]) . codegenIR) args
+  If cond tr fl -> do
+    let thenBlock = (LLAST.mkName "ifthen")
+        elseBlock = (LLAST.mkName "ifelse")
+        contBlock = (LLAST.mkName "ifcont")
+    condOp <- codegenIR cond
+    false <- IRB.double 0
+    test <- IRB.fcmp LLAST.ONE false condOp
+    IRB.condBr test thenBlock elseBlock
+
+    IRB.emitBlockStart thenBlock
+    trval <- codegenIR tr
+    IRB.br contBlock
+
+    IRB.emitBlockStart elseBlock
+    flval <- codegenIR fl
+    IRB.br contBlock
+
+    IRB.emitBlockStart contBlock
+    IRB.phi [(trval, thenBlock), (flval, elseBlock)]
+
 
 codegenDefn :: Defn -> (IRB.ModuleBuilderT Codegen) LLAST.Operand
 codegenDefn = \case
