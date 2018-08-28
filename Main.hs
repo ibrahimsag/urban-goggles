@@ -41,7 +41,7 @@ lexer = Tok.makeTokenParser style
     style = emptyDef {
         Tok.commentLine = "#"
       , Tok.reservedOpNames = ["+", "*", "-", "/", ";", ",", "<"]
-      , Tok.reservedNames = ["def", "extern", "if", "then", "else", "in", "for", "binary", "unary"]
+      , Tok.reservedNames = ["def", "extern", "if", "then", "else", "in", "for", "binary", "unary", "var"]
       }
 
 integer :: Parser Integer
@@ -89,6 +89,7 @@ data Expr
   | UnaryOp Name Expr
   | If Expr Expr Expr
   | For Name Expr Expr Expr Expr
+  | Let Name Expr Expr
   deriving (Eq, Ord, Show)
 
 data Defn
@@ -183,12 +184,25 @@ for = do
   body <- expr
   return $ For var start cond step body
 
+letins :: Parser Expr
+letins = do
+  reserved "var"
+  defs <- commaSep $ do
+    var <- identifier
+    reservedOp "="
+    val <- expr
+    return (var, val)
+  reserved "in"
+  body <- expr
+  return $ foldr (uncurry Let) body defs
+
 factor :: Parser Expr
 factor = try floating
       <|> try int
       <|> try call
       <|> try ifthen
       <|> try for
+      <|> try letins
       <|> variable
       <|> parens expr
 
@@ -275,14 +289,25 @@ emptyCodegen = CodegenState
     , anonSupply = 0
     }
 
+getvar :: Name -> IRB.ModuleBuilderT Codegen LLAST.Operand
+getvar name = maybe (error ("unknown variable: " ++ name)) id . Map.lookup name <$> gets symbolTable
+
+assignvar :: Name -> LLAST.Operand -> IRB.ModuleBuilderT Codegen ()
+assignvar name var = modify (\s -> s { symbolTable = Map.insert name var (symbolTable s) })
+
 type Codegen =  (StateT CodegenState IO)
 
 codegenIR :: Expr -> IRB.IRBuilderT (IRB.ModuleBuilderT Codegen) LLAST.Operand
 codegenIR = \case
   Float d         -> IRB.double d
-  Var name        -> maybe (error ("unknown variable: " ++ name)) id . Map.lookup name <$> gets symbolTable
+  Var name        -> (lift $ getvar name) >>= flip IRB.load 0
   UnaryOp op e -> do
     codegenIR (Call ("unary" ++ op) [e])
+  BinaryOp "=" (Var var) val -> do
+    i <- lift $ getvar var
+    v <- codegenIR val
+    IRB.store i 0 v
+    return v
   BinaryOp op l r -> do
     let callWithOps f = join (f <$> codegenIR l <*> codegenIR r)
     case op of
@@ -314,27 +339,34 @@ codegenIR = \case
     contBlock <- IRB.block `IRB.named` "if.cont"
     IRB.phi [(trval, thenBlock), (flval, elseBlock)]
   For ivar start cond step body -> mdo
+    i <- IRB.alloca doubleTy Nothing 0 `IRB.named` "i"
 
     istart <- codegenIR start  -- Generate loop variable initial value
     stepVal <- codegenIR step  -- Generate loop variable step
-    entryBlock' <- IRB.currentBlock
+
+    IRB.store i 0 istart
+    lift $ assignvar ivar i
     IRB.br loopBlock
 
     loopBlock  <- IRB.block `IRB.named` "for.loop"
-    i <- IRB.phi [(istart, entryBlock'), (iNext, loopBlock')]
-    modify (\s -> s { symbolTable = Map.insert ivar i (symbolTable s) })
-
     codegenIR body
-    iNext <- IRB.fadd i stepVal
+    iCurrent <- IRB.load i 0
+    iNext <- IRB.fadd iCurrent stepVal
+    IRB.store i 0 iNext
 
     condOp <- codegenIR cond
     falseOp <- IRB.double 0
     test <- IRB.fcmp LLAST.ONE falseOp condOp
-    loopBlock' <- IRB.currentBlock
     IRB.condBr test loopBlock contBlock
 
     contBlock  <- IRB.block `IRB.named` "for.cont"
     IRB.double 0
+  Let var val body -> do
+    i <- IRB.alloca doubleTy Nothing 0 `IRB.named` (packShort var)
+    v <- codegenIR val
+    IRB.store i 0 v
+    lift $ assignvar var i
+    codegenIR body
 
 codegenDefn :: Defn -> (IRB.ModuleBuilderT Codegen) LLAST.Operand
 codegenDefn = \case
@@ -350,14 +382,13 @@ codegenDefn = \case
           doubleTy
           $ \argOs -> do
       entryBlock <- IRB.block `IRB.named` "entry"
-      localSymTable <- gets symbolTable
-      let updateSymTableWithArgs symT = foldl'
-                    (\symTable (name, arg) -> Map.insert name arg symTable)
-                    symT
-                    (zip args argOs)
-      modify $ \s -> s { symbolTable = updateSymTableWithArgs (symbolTable s)}
+
+      forM_ (zip args argOs) $ \(name, arg) -> do
+        a <- IRB.alloca doubleTy Nothing 0
+        IRB.store a 0 arg
+        lift $ assignvar name a
+
       codegenIR body >>= IRB.ret
-      modify $ \s -> s { symbolTable = localSymTable }
     modify (\s -> s { functionTable = Map.insert name funcOperand (functionTable s) })
     return funcOperand
   Extern name args -> do
