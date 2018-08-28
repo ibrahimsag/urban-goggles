@@ -119,6 +119,9 @@ table = [ [ binary "*" Ex.AssocLeft
           , binary "-" Ex.AssocLeft
           ]
         , [ binary "<" Ex.AssocLeft
+          , binary "<" Ex.AssocLeft
+          ]
+        , [ binary "=" Ex.AssocRight
           ]
         ]
 
@@ -281,16 +284,15 @@ codegenIR = \case
   UnaryOp op e -> do
     codegenIR (Call ("unary" ++ op) [e])
   BinaryOp op l r -> do
-    lo <- codegenIR l
-    ro <- codegenIR r
+    let callWithOps f = join (f <$> codegenIR l <*> codegenIR r)
     case op of
-      "+" -> IRB.fadd lo ro
-      "-" -> IRB.fsub lo ro
-      "*" -> IRB.fmul lo ro
-      "<" -> IRB.fcmp LLAST.ULT lo ro >>= (\operand -> IRB.uitofp operand doubleTy)
+      "+" -> callWithOps IRB.fadd
+      "-" -> callWithOps IRB.fsub
+      "*" -> callWithOps IRB.fmul
+      "<" -> callWithOps (IRB.fcmp LLAST.ULT) >>= (\operand -> IRB.uitofp operand doubleTy)
       _   -> codegenIR (Call ("binary" ++ op) [l, r])
   Call name args  ->  do
-    calleeOperand <- (maybe (error ("unknown function: " ++ name)) id . Map.lookup name ) <$> gets functionTable
+    calleeOperand <- (maybe (error ("unknown function: " ++ name)) id . Map.lookup name) <$> gets functionTable
     IRB.call calleeOperand =<< traverse (fmap (,[]) . codegenIR) args
   If cond tr fl -> do
     thenBlock <- IRB.freshName "ifthen"
