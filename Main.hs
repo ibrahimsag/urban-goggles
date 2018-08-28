@@ -294,41 +294,36 @@ codegenIR = \case
   Call name args  ->  do
     calleeOperand <- (maybe (error ("unknown function: " ++ name)) id . Map.lookup name) <$> gets functionTable
     IRB.call calleeOperand =<< traverse (fmap (,[]) . codegenIR) args
-  If cond tr fl -> do
-    thenBlock <- IRB.freshName "ifthen"
-    elseBlock <- IRB.freshName "ifelse"
-    contBlock <- IRB.freshName "ifcont"
+
+  If cond tr fl -> mdo
     condOp <- codegenIR cond
     false <- IRB.double 0
     test <- IRB.fcmp LLAST.ONE false condOp
     IRB.condBr test thenBlock elseBlock
-    
-    IRB.emitBlockStart thenBlock
+
+    IRB.block `IRB.named` "if.then"
     trval <- codegenIR tr
     thenBlock <- IRB.currentBlock
     IRB.br contBlock
 
-    IRB.emitBlockStart elseBlock
+    IRB.block `IRB.named` "if.else"
     flval <- codegenIR fl
     elseBlock <- IRB.currentBlock
     IRB.br contBlock
 
-    IRB.emitBlockStart contBlock
+    contBlock <- IRB.block `IRB.named` "if.cont"
     IRB.phi [(trval, thenBlock), (flval, elseBlock)]
   For ivar start cond step body -> mdo
-    entryBlock <- IRB.freshName "for.entry"
-    loopBlock  <- IRB.freshName "for.loop"
-    contBlock  <- IRB.freshName "for.cont"
 
-    IRB.emitBlockStart entryBlock
     istart <- codegenIR start  -- Generate loop variable initial value
     stepVal <- codegenIR step  -- Generate loop variable step
     entryBlock' <- IRB.currentBlock
     IRB.br loopBlock
 
-    IRB.emitBlockStart loopBlock
+    loopBlock  <- IRB.block `IRB.named` "for.loop"
     i <- IRB.phi [(istart, entryBlock'), (iNext, loopBlock')]
     modify (\s -> s { symbolTable = Map.insert ivar i (symbolTable s) })
+
     codegenIR body
     iNext <- IRB.fadd i stepVal
 
@@ -338,7 +333,7 @@ codegenIR = \case
     loopBlock' <- IRB.currentBlock
     IRB.condBr test loopBlock contBlock
 
-    IRB.emitBlockStart contBlock
+    contBlock  <- IRB.block `IRB.named` "for.cont"
     IRB.double 0
 
 codegenDefn :: Defn -> (IRB.ModuleBuilderT Codegen) LLAST.Operand
@@ -354,6 +349,7 @@ codegenDefn = \case
           (fmap ((doubleTy,) . IRB.ParameterName . packShort) args)
           doubleTy
           $ \argOs -> do
+      entryBlock <- IRB.block `IRB.named` "entry"
       localSymTable <- gets symbolTable
       let updateSymTableWithArgs symT = foldl'
                     (\symTable (name, arg) -> Map.insert name arg symTable)
